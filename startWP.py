@@ -1,22 +1,31 @@
 #!/usr/bin/python3
 import requests
 import json
-import mysql.connector
 import logging
 import fcntl
 import os
-import sys
+import sys  
 import time
 import config
 from datetime import datetime, timedelta
 
-min_temp = 45
-solar_prod_level = 5100
-actual_use_limit = 750
-red_for_bad_weather = 3000
+min_temp = 50
+solar_prod_level = 1300
+actual_use_limit = 850
+red_for_bad_weather = 1000
+
+def is_winter():
+    current_month = datetime.now().month
+    return current_month in [11, 12, 1, 2]  # November, December, January, February
+
+# Check if it's winter and adjust parameters
+if is_winter():
+    min_temp = 50  # Set minimum temperature for winter
+    solar_prod_level = 1000  # Set solar production level for winter
+    red_for_bad_weather = 750  # Set reduction for bad weather in winter
 
 def instance_already_running():
-    lock_file_pointer = os.open(f"/tmp/controlWP.lock", os.O_WRONLY | os.O_CREAT)
+    lock_file_pointer = os.open(f"/tmp/startWP.lock", os.O_WRONLY | os.O_CREAT)
     try:
         fcntl.lockf(lock_file_pointer, fcntl.LOCK_EX | fcntl.LOCK_NB)
         already_running = False
@@ -42,8 +51,16 @@ try:
 except ImportError:
     pass
 
-connection = mysql.connector.connect(host='localhost', database=DB_NAME, user=DB_USER, password=DB_PASS, auth_plugin='mysql_native_password')
+try:
+    import mysql.connector
+    print("mysql.connector importiert, version:", getattr(mysql.connector, "__version__", "unbekannt"))
+except Exception as e:
+    import traceback, sys
+    print("Fehler beim Import von mysql.connector:", e)
+    traceback.print_exc()
+    sys.exit(1)
 
+connection = mysql.connector.connect(host='localhost', database=DB_NAME, user=DB_USER, password=DB_PASS, auth_plugin='mysql_native_password')
 
 #check weahter conditions 
 #if weather is not good later today but 
@@ -57,14 +74,11 @@ def fetchShelly(description):
 
 def fetchTemp():
     cursor = connection.cursor(prepared=True)
-    cursor.execute('SELECT temp FROM oventrop_temps ORDER BY id DESC LIMIT 1;')
+    cursor.execute('SELECT temp_speicher FROM temp_speicher ORDER BY createdAt DESC LIMIT 1;')
     row = cursor.fetchone()
-    cursor.close()
-#   temp = requests.get(str(row[0]))
     print(row[0])
+    cursor.close()
     return int(row[0])
-#    return requests.get(+str(row[0]))
-
 
 def calcTotal(state, field):
     total  = state['emeters'][0][field]
@@ -92,35 +106,95 @@ def fetchWeather():
     result = cursor.fetchone()
     if result:
         avg_clouds_all = result[0]
-
-        # Convert the result to a float
         avg_clouds_all = float(avg_clouds_all)
+        print(f"The average value of clouds_all from {start_time} until {end_time} is {avg_clouds_all}.")
 
-    # Do something here
-    print(f"The average value of clouds_all from {start_time} until {end_time} is {avg_clouds_all}.")
+    # Get the current value of clouds_all
+    query = "SELECT clouds_all FROM weather_data ORDER BY dt DESC LIMIT 1"
+    cursor.execute(query)
+    result = cursor.fetchone()
+    if result:
+        current_clouds_all = result[0]
+        current_clouds_all = float(current_clouds_all)
+        print(f"The current value of clouds_all is {current_clouds_all}.")
 
     cursor.close()
-    return avg_clouds_all
+    return avg_clouds_all, current_clouds_all
+
+def get_avg_max_sol_w_last_two_years():
+    """
+    Get the average of the maximum sol_w of the last two years in a timerange of 5 days before and 15 days after today's date.
+
+    Returns:
+        float: The average of the maximum sol_w of the last two years in the timerange.
+    """
+    cursor = connection.cursor(prepared=True)
+    # Calculate the start and end dates of the timerange for last year
+    start_date_last_year = (datetime.now() - timedelta(weeks=52)).strftime('%Y-%m-%d %H:%M:%S')
+    end_date_last_year = (datetime.now() - timedelta(weeks=52) + timedelta(days=20)).strftime('%Y-%m-%d %H:%M:%S')
+
+    # Calculate the start and end dates of the timerange for the year before last year
+    start_date_year_before_last_year = (datetime.now() - timedelta(weeks=104)).strftime('%Y-%m-%d %H:%M:%S')
+    end_date_year_before_last_year = (datetime.now() - timedelta(weeks=104) + timedelta(days=20)).strftime('%Y-%m-%d %H:%M:%S')
+
+    # Get the maximum sol_w of the last two years in the timerange
+    query = f"SELECT AVG(max_sol_w) AS avg_max_sol_w FROM (SELECT MAX(sol_w) AS max_sol_w FROM shelly_solar WHERE stamp BETWEEN '{start_date_last_year}' AND '{end_date_last_year}' OR stamp BETWEEN '{start_date_year_before_last_year}' AND '{end_date_year_before_last_year}') AS subquery"
+    cursor.execute(query)
+    results = cursor.fetchall()
+    avg_max_sol_w_last_two_years = results[0][0]
+
+    cursor.close()
+
+    return avg_max_sol_w_last_two_years
+
+def get_avg_max_sol_w_last_20_days():
+    """
+    Get the average of the maximum sol_w of the last 10 days.
+
+    Returns:
+        float: The average of the maximum sol_w of the last 10 days.
+    """
+    cursor = connection.cursor(prepared=True)
+
+    # Calculate the start and end dates of the timerange for the last 20 days
+    start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d %H:%M:%S')
+    end_date = (datetime.now()).strftime('%Y-%m-%d %H:%M:%S')
+
+    # Get the maximum sol_w of the last 20 days
+    query = f"SELECT AVG(max_sol_w) AS avg_max_sol_w FROM (SELECT MAX(sol_w) AS max_sol_w FROM shelly_solar WHERE stamp BETWEEN '{start_date}' AND '{end_date}') AS subquery"
+    cursor.execute(query)
+    results = cursor.fetchall()
+    avg_max_sol_w_last_20_days = results[0][0]
+
+    cursor.close()
+
+    return avg_max_sol_w_last_20_days
 
 def startWP(actual_temp, solar_total):
     if   solar_total >= solar_prod_level and actual_usage < actual_use_limit:
-         print('we start the WP because there is free solar power')
-         url = "http://192.168.137.144/relay/0?turn=on"
+         msg = f'WP enabled - free solar power (solar {solar_total}W >= {solar_prod_level}W, usage {actual_usage}W < {actual_use_limit}W)'
+         print(msg)
+         logging.info(msg)
+         url = "http://192.168.137.68/relay/0?turn=on"
          payload={}
          files={}
          headers = {}
          response = requests.request("POST", url, headers=headers, data=payload, files=files)
          print(response.text)
     elif actual_temp < min_temp:
-         print('we start the WP because the minimal temp is reached')
-         url = "http://192.168.137.144/relay/0?turn=on"
+         msg = f'WP enabled - tank {actual_temp}C below minimum {min_temp}C (grid start, never without hot water)'
+         print(msg)
+         logging.info(msg)
+         url = "http://192.168.137.68/relay/0?turn=on"
          payload={}
          files={}
          headers = {}
          response = requests.request("POST", url, headers=headers, data=payload, files=files)
          print(response.text)
     else:
-        print('wp does not need to be started')
+        msg = f'no start - no surplus (solar {solar_total}W, usage {actual_usage}W) and tank {actual_temp}C >= {min_temp}C'
+        print(msg)
+        logging.info(msg)
     
 actual_temp = fetchTemp()
 
@@ -140,12 +214,15 @@ print('netz total: ', netz_total)
 actual_usage = solar_total + netz_total
 print('actual usage: ', actual_usage)
 
-avg_clouds_forecast = fetchWeather()
-if   avg_clouds_forecast > 60:
+
+test_solar_prod_level = get_avg_max_sol_w_last_two_years()
+
+test_solar_prod_level_last_10_days = get_avg_max_sol_w_last_20_days()
+
+avg_clouds_forecast, avg_clouds_current_forecast = fetchWeather()
+if  avg_clouds_forecast > 70 and avg_clouds_current_forecast < 70:
     solar_prod_level = solar_prod_level - red_for_bad_weather
     print('solar_prod_level after reducation')
     print(solar_prod_level)
    
 startWP(actual_temp, solar_total)
-
-
