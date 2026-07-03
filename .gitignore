@@ -1,0 +1,20 @@
+# --- secrets (never commit) ---
+.env
+config.py
+
+# --- python ---
+__pycache__/
+*.pyc
+
+# --- node ---
+node_modules/
+
+# --- runtime logs / lock files ---
+*.log
+
+# --- editor / os ---
+.vscode/
+.DS_Store
+
+# --- stray/junk ---
+5

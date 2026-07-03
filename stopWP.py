@@ -132,6 +132,20 @@ def fetchWeather():
     return avg_clouds, cur_clouds
 
 
+def log_decision(script, action, relay, tank, solar_total, netz_total, actual_usage, solar_prod_level, sun_present, heating, reason):
+    """Persist one decision row so Grafana can show WHY the pump switched."""
+    try:
+        cur = connection.cursor(prepared=True)
+        cur.execute('INSERT INTO wp_decision (ts, script, action, relay, tank, solar_total, netz_total, actual_usage, solar_prod_level, sun_present, heating, reason) '
+                    'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);',
+                    (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), script, action, relay, tank,
+                     solar_total, netz_total, actual_usage, solar_prod_level, sun_present, heating, reason[:255]))
+        connection.commit()
+        cur.close()
+    except mysql.connector.Error as error:
+        logging.error("Failed to insert wp_decision {}".format(error))
+
+
 def turnOff():
     url = WP_OFF_URL
     payload = {}
@@ -176,16 +190,23 @@ sun_present = solar_total >= solar_prod_level
 # idle, sunless and the tank is warm do we drop the .68 enable, so the pump's
 # own thermostat cannot top the tank up on grid power in the evening.
 if heating:
+    action, relay = 'kept_on', None
     msg = f'kept ON - compressor running, never abort mid-cycle (tank {tank}C)'
 elif sun_present:
+    action, relay = 'kept_on', None
     msg = f'kept ON - sun present (solar {solar_total}W >= {solar_prod_level}W)'
 elif tank < comfort_floor:
+    action, relay = 'kept_on', None
     msg = f'kept ON - tank {tank}C below comfort floor {comfort_floor}C'
 else:
     turnOff()
+    action, relay = 'disabled', 'off'
     msg = f'WP disabled - idle, no sun (solar {solar_total}W), tank {tank}C warm, usage {actual_usage}W'
 
 logging.info(msg)
 print(msg)
+
+log_decision('stop', action, relay, tank, solar_total, netz_total, actual_usage,
+             solar_prod_level, 1 if sun_present else 0, 1 if heating else 0, msg)
 
 connection.close()

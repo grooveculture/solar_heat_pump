@@ -170,31 +170,38 @@ def get_avg_max_sol_w_last_20_days():
 
     return avg_max_sol_w_last_20_days
 
+def log_decision(script, action, relay, tank, solar_total, netz_total, actual_usage, solar_prod_level, sun_present, heating, reason):
+    """Persist one decision row so Grafana can show WHY the pump switched."""
+    try:
+        cur = connection.cursor(prepared=True)
+        cur.execute('INSERT INTO wp_decision (ts, script, action, relay, tank, solar_total, netz_total, actual_usage, solar_prod_level, sun_present, heating, reason) '
+                    'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);',
+                    (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), script, action, relay, tank,
+                     solar_total, netz_total, actual_usage, solar_prod_level, sun_present, heating, reason[:255]))
+        connection.commit()
+        cur.close()
+    except mysql.connector.Error as error:
+        logging.error("Failed to insert wp_decision {}".format(error))
+
 def startWP(actual_temp, solar_total):
+    sun_present = 1 if solar_total >= solar_prod_level else 0
     if   solar_total >= solar_prod_level and actual_usage < actual_use_limit:
+         action, relay = 'enabled', 'on'
          msg = f'WP enabled - free solar power (solar {solar_total}W >= {solar_prod_level}W, usage {actual_usage}W < {actual_use_limit}W)'
-         print(msg)
-         logging.info(msg)
-         url = "http://192.168.137.68/relay/0?turn=on"
-         payload={}
-         files={}
-         headers = {}
-         response = requests.request("POST", url, headers=headers, data=payload, files=files)
-         print(response.text)
     elif actual_temp < min_temp:
+         action, relay = 'enabled', 'on'
          msg = f'WP enabled - tank {actual_temp}C below minimum {min_temp}C (grid start, never without hot water)'
-         print(msg)
-         logging.info(msg)
-         url = "http://192.168.137.68/relay/0?turn=on"
-         payload={}
-         files={}
-         headers = {}
-         response = requests.request("POST", url, headers=headers, data=payload, files=files)
-         print(response.text)
     else:
+        action, relay = 'no_start', None
         msg = f'no start - no surplus (solar {solar_total}W, usage {actual_usage}W) and tank {actual_temp}C >= {min_temp}C'
-        print(msg)
-        logging.info(msg)
+    print(msg)
+    logging.info(msg)
+    if relay == 'on':
+        url = "http://192.168.137.68/relay/0?turn=on"
+        response = requests.request("POST", url, headers={}, data={}, files={})
+        print(response.text)
+    log_decision('start', action, relay, actual_temp, solar_total, netz_total, actual_usage,
+                 solar_prod_level, sun_present, None, msg)
     
 actual_temp = fetchTemp()
 
