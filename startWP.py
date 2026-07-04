@@ -70,7 +70,7 @@ def fetchShelly(description):
     cursor.execute('SELECT id FROM shelly_cfg WHERE description = ?;', (description,))
     row = cursor.fetchone()
     cursor.close()
-    return requests.get('http://192.168.137.'+str(row[0])+'/status')
+    return requests.get('http://192.168.137.'+str(row[0])+'/status', timeout=10)
 
 def fetchTemp():
     cursor = connection.cursor(prepared=True)
@@ -198,26 +198,32 @@ def startWP(actual_temp, solar_total):
     logging.info(msg)
     if relay == 'on':
         url = "http://192.168.137.68/relay/0?turn=on"
-        response = requests.request("POST", url, headers={}, data={}, files={})
+        response = requests.request("POST", url, headers={}, data={}, files={}, timeout=10)
         print(response.text)
     log_decision('start', action, relay, actual_temp, solar_total, netz_total, actual_usage,
                  solar_prod_level, sun_present, None, msg)
     
 actual_temp = fetchTemp()
 
-act_solar = fetchShelly('shelly-3em-solar')
-print(act_solar)
-response = json.loads(act_solar.content)
-print(response)
-solar_total = calcTotal(response, 'power')
-print('solar total: ', solar_total)
+# The Shelly meters live on the LAN and can blip. If we cannot read them, skip
+# this run and leave the relay untouched (next cron run retries) rather than
+# crashing the script on an un-guarded network call.
+try:
+    act_solar = fetchShelly('shelly-3em-solar')
+    print(act_solar)
+    response = json.loads(act_solar.content)
+    solar_total = calcTotal(response, 'power')
+    print('solar total: ', solar_total)
 
-act_netz = fetchShelly('shelly-3em-elektra')
-print(act_netz)
-response = json.loads(act_netz.content)
-print(response)
-netz_total = calcTotal(response, 'power')
-print('netz total: ', netz_total)
+    act_netz = fetchShelly('shelly-3em-elektra')
+    print(act_netz)
+    response = json.loads(act_netz.content)
+    netz_total = calcTotal(response, 'power')
+    print('netz total: ', netz_total)
+except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+    logging.warning('startWP: could not read meters, skipping run (relay unchanged): %s', e)
+    sys.exit(0)
+
 actual_usage = solar_total + netz_total
 print('actual usage: ', actual_usage)
 

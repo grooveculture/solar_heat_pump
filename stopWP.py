@@ -17,6 +17,9 @@ comfort_floor = 50        # degC: at/above this the tank counts as "warm enough"
 solar_prod_level = 1300   # W of PV production that counts as real sun (summer)
 red_for_bad_weather = 1000
 rise_threshold = 0.3      # degC rise over ~6 min => a compressor is actively heating
+pump_power_level = 3000   # W of total house draw that means the compressor is running.
+                          # Measured: pump pulls ~3.3-4.8 kW, standby ~0.3 kW, cooking ~2.4 kW,
+                          # so 3000 sits safely above cooking and below the running pump.
 
 
 def is_winter():
@@ -67,7 +70,7 @@ def fetchShelly(description):
     cursor.execute('SELECT id FROM shelly_cfg WHERE description = ?;', (description,))
     row = cursor.fetchone()
     cursor.close()
-    return requests.get('http://192.168.137.'+str(row[0])+'/status')
+    return requests.get('http://192.168.137.'+str(row[0])+'/status', timeout=10)
 
 
 def calcTotal(state, field):
@@ -97,15 +100,22 @@ def isRising(table, threshold):
     return (float(rows[0][0]) - float(rows[2][0])) >= threshold
 
 
-def isHeating():
-    """SAFETY: True if the compressor appears to be actively running, so we must
-    NOT drop the enable and abort it mid-cycle. We treat it as running if ANY of
-    the heated loops is climbing: the hot-water tank (DHW, summer) OR either
-    heating flow / Vorlauf (space heating, winter). Stage-agnostic and immune to
-    cooking, which never warms any of these. Errs on the side of 'running'."""
-    return (isRising('temp_speicher', rise_threshold)
-            or isRising('temp_vorlauf_boden', rise_threshold)
-            or isRising('temp_vorlauf_radiator', rise_threshold))
+def isHeating(actual_usage):
+    """SAFETY: True if the DHW compressor appears to be running, so we must NOT
+    drop the enable and abort it mid-cycle. Two independent signals, either is
+    enough ("if it's clearly the pump, don't stop"):
+
+      1. tank temp_speicher is climbing (proven heating; immune to cooking, which
+         never warms the tank). The Vorlauf (space-heating flow) sensors were
+         dropped - they drift on their own in summer and gave false readings that
+         kept the pump enabled overnight.
+      2. total house draw >= pump_power_level. The compressor pulls ~3.3-4.8 kW,
+         far above standby (~0.3 kW) and cooking (~2.4 kW), so a high draw at
+         night means the pump. This catches the run ~4 min BEFORE the tank starts
+         to climb (measured 2026-07-04), covering the thermal lag at start-up.
+
+    When neither holds, the pump is clearly idle and stopWP is free to disable."""
+    return isRising('temp_speicher', rise_threshold) or actual_usage >= pump_power_level
 
 
 def fetchWeather():
@@ -151,25 +161,31 @@ def turnOff():
     payload = {}
     files = {}
     headers = {}
-    return requests.request("POST", url, headers=headers, data=payload, files=files)
+    return requests.request("POST", url, headers=headers, data=payload, files=files, timeout=10)
 
 
 # --- gather the current state ------------------------------------------------
-act_solar = fetchShelly('shelly-3em-solar')
-response = json.loads(act_solar.content)
-solar_total = calcTotal(response, 'power')
-print('solar total: ', solar_total)
+# The Shelly meters are on the LAN and can blip. If we cannot read them we CANNOT
+# make a safe stop decision, so we skip this run and leave the relay untouched
+# (the next cron run, ~15 min later, retries). A transient blip must never crash
+# the script - that used to leave .68 enabled and let the pump grid-heat overnight.
+try:
+    act_solar = fetchShelly('shelly-3em-solar')
+    solar_total = calcTotal(json.loads(act_solar.content), 'power')
+    print('solar total: ', solar_total)
 
-act_netz = fetchShelly('shelly-3em-elektra')
-response = json.loads(act_netz.content)
-netz_total = calcTotal(response, 'power')
-print('netz total: ', netz_total)
+    act_netz = fetchShelly('shelly-3em-elektra')
+    netz_total = calcTotal(json.loads(act_netz.content), 'power')
+    print('netz total: ', netz_total)
+except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+    logging.warning('stopWP: could not read meters, skipping run (relay unchanged): %s', e)
+    sys.exit(0)
 
 actual_usage = solar_total + netz_total
 print('actual usage: ', actual_usage)
 
 tank = fetchTemp()
-heating = isHeating()
+heating = isHeating(actual_usage)
 print('tank: ', tank, ' heating: ', heating)
 
 # Lower the sun bar when it is clear now but the forecast turns bad later -
@@ -191,7 +207,7 @@ sun_present = solar_total >= solar_prod_level
 # own thermostat cannot top the tank up on grid power in the evening.
 if heating:
     action, relay = 'kept_on', None
-    msg = f'kept ON - compressor running, never abort mid-cycle (tank {tank}C)'
+    msg = f'kept ON - compressor running, never abort mid-cycle (tank {tank}C, usage {actual_usage}W)'
 elif sun_present:
     action, relay = 'kept_on', None
     msg = f'kept ON - sun present (solar {solar_total}W >= {solar_prod_level}W)'

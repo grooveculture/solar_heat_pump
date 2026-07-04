@@ -12,17 +12,29 @@ MySQL DB (`solar`), control the heat pump (WP), and feed a Grafana dashboard.
   and `home.linuxkiste.ch`. Admin user `leinad`, read-only `viewer`.
 
 ## 2. Heat-pump (WP) control
-Two cron scripts share thresholds so they never fight:
+Two cron scripts share thresholds so they never fight. Both run **24/7**
+(`startWP` `*/5 * * * *`, `stopWP` `*/15 * * * *`):
 - **`startWP.py`** — turns the `.68` enable relay ON when: solar surplus
   (`solar_total >= solar_prod_level` AND `usage < actual_use_limit`) OR tank
-  `< min_temp` (50 °C hot-water floor).
+  `< min_temp` (50 °C hot-water floor). Running 24/7 is safe: the solar branch
+  can't fire at night (the 3EM reads ~−5 W), so overnight it only enforces the floor.
 - **`stopWP.py`** — drops `.68` only when idle + no sun + tank warm. SAFETY: never
-  aborts a running compressor (detected via `temp_speicher` / Vorlauf rising ≥ 0.3 °C
-  over ~6 min). Immune to cooking load (the old `sum > 1000 W` bug).
+  aborts a running compressor. "Running" = tank `temp_speicher` rising ≥ 0.3 °C over
+  ~6 min **OR** total house draw ≥ `pump_power_level` (3000 W). The pump pulls
+  ~3.3–4.8 kW, well above cooking (~2.4 kW) and standby (~0.3 kW), and the power
+  signal leads the tank by ~4 min. The Vorlauf (space-heating flow) sensors were
+  **dropped** — they drift on their own in summer and gave false "heating" readings.
+
+Both scripts wrap the Shelly meter reads in `try/except` with `timeout=10`: a LAN
+blip now logs a warning and skips the run (relay untouched, next tick retries)
+instead of crashing.
 
 History: the evening heating was ultimately caused by the pump being **physically
 switched to autonomous mode** (ran on its own thermostat regardless of `.68`). On
-2026-07-03 it was switched back to follow the scripts. The rewrite still stands.
+2026-07-03 it was switched back to follow the scripts. On **2026-07-04** the pump
+still grid-heated at 03:00 because `.68` was left enabled overnight (false Vorlauf
+"heating" at 23:00 + two crashed stop runs + no cron coverage 23:00→09:00); all
+three were fixed (isHeating rewrite, network guards, 24/7 schedule). Rewrite stands.
 
 ## 3. WP decision logging (added 2026-07-03)
 Both scripts call `log_decision()` → inserts one row per run into MySQL table
