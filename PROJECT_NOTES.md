@@ -87,13 +87,13 @@ Panels added/changed 2026-07-04 (all use the swap-safe `sol_w` methodology, see 
 | 82 | Hausverbrauch/Monat gestapelt: Eigen(Solar) vs Elektra, kWh (ab 2025) |
 | 83 | dito als **%**-Anteil (jeder Balken = 100 %) |
 | 84 | Hausverbrauch/**Tag** gestapelt (letzte 30 Tage) |
-| 38/39/42/41/53/50/40/69 | old EA panels: **corrected to `sol_w`** + **renamed "Autarkie"** |
+| Autarkie today/yesterday/(Monat) (38/39/69) | old EA panels: **corrected to `sol_w`** + **renamed "Autarkie"** (user later pruned the 2025/30d/¼y/½y/year-back variants) |
 
 ### Eigenanteil vs. Autarkie (two distinct KPIs — do not conflate)
 - **Eigenanteil / Eigenverbrauchsquote** = Eigenverbrauch / **Produktion** = (prod−feedin)/prod.
   Only panel **77** ("Eigenanteil pro Jahr"). 2025 = 32.9 %.
 - **Autarkiegrad** = Eigenverbrauch / **Hausverbrauch** = (prod−feedin)/((prod−feedin)+import).
-  All "Autarkie …" panels (today/yesterday/Monat/2025/30d/¼y/½y/year back). 2025 = 20.7 %.
+  The "Autarkie …" panels (currently today/yesterday/Monat). 2025 = 20.7 %.
 - Same numerator (self-consumed solar), different denominator. Autarkie<Eigenanteil here because
   the house consumes more than the PV produces per year (2025: 14 660 vs 9 219 kWh).
 
