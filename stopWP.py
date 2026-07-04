@@ -215,9 +215,15 @@ elif tank < comfort_floor:
     action, relay = 'kept_on', None
     msg = f'kept ON - tank {tank}C below comfort floor {comfort_floor}C'
 else:
-    turnOff()
     action, relay = 'disabled', 'off'
     msg = f'WP disabled - idle, no sun (solar {solar_total}W), tank {tank}C warm, usage {actual_usage}W'
+    try:
+        turnOff()
+    except requests.RequestException as e:
+        # Relay unreachable: don't crash. .68 may still be ON; log it as unconfirmed
+        # (relay=NULL) so wp_decision is honest, and let the next cron run retry.
+        relay = None
+        msg = f'WP disable FAILED - .68 relay unreachable, may still be ON ({e}); retry next run'
 
 logging.info(msg)
 print(msg)

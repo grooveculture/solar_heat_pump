@@ -198,8 +198,14 @@ def startWP(actual_temp, solar_total):
     logging.info(msg)
     if relay == 'on':
         url = "http://192.168.137.68/relay/0?turn=on"
-        response = requests.request("POST", url, headers={}, data={}, files={}, timeout=10)
-        print(response.text)
+        try:
+            response = requests.request("POST", url, headers={}, data={}, files={}, timeout=10)
+            print(response.text)
+        except requests.RequestException as e:
+            # Relay unreachable: don't crash. Log it as unconfirmed (relay=NULL) so
+            # wp_decision is honest, and let the next cron run retry the enable.
+            relay = None
+            logging.warning('startWP: .68 relay enable FAILED (%s); retry next run', e)
     log_decision('start', action, relay, actual_temp, solar_total, netz_total, actual_usage,
                  solar_prod_level, sun_present, None, msg)
     
