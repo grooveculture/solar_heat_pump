@@ -56,9 +56,11 @@ Backfilled from `controlWP.log` (only post-rewrite lines from 2026-07-02 match).
 
 ## 4. Grafana dashboard "solar dashboard"
 - Dashboard uid **`CzWLWUbMz`**, MySQL datasource uid **`bZZ3Wdt7k`** (name "MySQL", db `solar`).
-- Add panels via API: `POST /api/dashboards/db` with `{"dashboard":<model>,"overwrite":true}`,
-  Bearer = a service-account **Editor** token. Always APPEND (new ids, high gridPos.y);
-  never rewrite existing panels.
+- Add panels via API: `POST /api/dashboards/db`, Bearer = a service-account **Editor** token.
+  Always APPEND (new ids, high gridPos.y). **CONCURRENCY:** the user edits/arranges the dashboard
+  in the UI live. Do NOT blindly `overwrite:true` on a stale model — re-fetch immediately before
+  writing, keep the fetched `version`, post with `overwrite:false`, and retry on a 412 conflict.
+  (A clobber happened 2026-07-04; recovered via `/api/dashboards/uid/:uid/versions/:v`.)
 
 Panels added this session (66–76, all at the bottom, existing panels untouched):
 | id | panel |
@@ -75,9 +77,30 @@ Panels added this session (66–76, all at the bottom, existing panels untouched
 | 75 | Bezugspreis (elektrasolar+, inkl. MWST) 29.87 Rp/kWh |
 | 76 | Einspeise-Vergütung (Q1 2026, inkl. HKN) 12.27 Rp/kWh |
 
+Panels added/changed 2026-07-04 (all use the swap-safe `sol_w` methodology, see §5):
+| id | panel |
+|----|-------|
+| 77 | Eigenanteil pro Jahr (bar, ab 2025) — self/**production** |
+| 78 | Elektra Energiekosten pro Jahr (bar, ab 2025) CHF |
+| 79 | Stromverbrauch Haus pro Jahr (bar, ab 2025) kWh |
+| 80/81 | Effektive Stromkosten (Monat/Jahr) = Energiekosten − Solar-Ertrag; grün<0/rot≥0 |
+| 82 | Hausverbrauch/Monat gestapelt: Eigen(Solar) vs Elektra, kWh (ab 2025) |
+| 83 | dito als **%**-Anteil (jeder Balken = 100 %) |
+| 84 | Hausverbrauch/**Tag** gestapelt (letzte 30 Tage) |
+| 38/39/42/41/53/50/40/69 | old EA panels: **corrected to `sol_w`** + **renamed "Autarkie"** |
+
+### Eigenanteil vs. Autarkie (two distinct KPIs — do not conflate)
+- **Eigenanteil / Eigenverbrauchsquote** = Eigenverbrauch / **Produktion** = (prod−feedin)/prod.
+  Only panel **77** ("Eigenanteil pro Jahr"). 2025 = 32.9 %.
+- **Autarkiegrad** = Eigenverbrauch / **Hausverbrauch** = (prod−feedin)/((prod−feedin)+import).
+  All "Autarkie …" panels (today/yesterday/Monat/2025/30d/¼y/½y/year back). 2025 = 20.7 %.
+- Same numerator (self-consumed solar), different denominator. Autarkie<Eigenanteil here because
+  the house consumes more than the PV produces per year (2025: 14 660 vs 9 219 kWh).
+
 ### Month / year SQL filters
 - Month: `stamp like concat(FROM_UNIXTIME(UNIX_TIMESTAMP(),'%Y-%m'),'%')`
 - Year:  `stamp like concat(FROM_UNIXTIME(UNIX_TIMESTAMP(),'%Y'),'%')`
+- „ab 2025": `stamp >= '2025-01-01'` grouped `YEAR(stamp)` / `DATE_FORMAT(stamp,'%Y-%m')`.
 
 ## 5. Energy data quality — IMPORTANT
 The `shelly_solar` energy columns are unreliable:
