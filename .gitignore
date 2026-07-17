@@ -16,5 +16,8 @@ node_modules/
 .vscode/
 .DS_Store
 
+# --- claude code (scratch + contains API tokens) ---
+.claude/
+
 # --- stray/junk ---
 5

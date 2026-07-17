@@ -183,6 +183,21 @@ def log_decision(script, action, relay, tank, solar_total, netz_total, actual_us
     except mysql.connector.Error as error:
         logging.error("Failed to insert wp_decision {}".format(error))
 
+HOLIDAY_FLAG_URL = "http://192.168.137.227/rpc/Switch.GetStatus?id=0"
+HOLIDAY_FILE = "/tmp/wp_holiday"
+
+def holiday_mode():
+    """Vacation override: 'do not heat at all'. Either manual switch enables it:
+      - the .227 relay (wired to NOTHING - only hosts the tank temp addon),
+        toggled with one tap in the Shelly app  -> output ON = holiday.
+      - a local flag file `touch /tmp/wp_holiday`, an SSH/cron backup switch.
+    Raises on a network error so the caller can skip the run (leave .68 as-is)
+    rather than guess the flag state."""
+    if os.path.exists(HOLIDAY_FILE):
+        return True
+    r = requests.get(HOLIDAY_FLAG_URL, timeout=10)
+    return bool(r.json().get('output'))
+
 def startWP(actual_temp, solar_total):
     sun_present = 1 if solar_total >= solar_prod_level else 0
     if   solar_total >= solar_prod_level and actual_usage < actual_use_limit:
@@ -209,6 +224,32 @@ def startWP(actual_temp, solar_total):
     log_decision('start', action, relay, actual_temp, solar_total, netz_total, actual_usage,
                  solar_prod_level, sun_present, None, msg)
     
+# --- Holiday override --------------------------------------------------------
+# One tap on the .227 relay in the Shelly app (or `touch /tmp/wp_holiday`) forces
+# the pump fully OFF and skips ALL normal logic - even the hot-water floor - for
+# vacations when nobody needs hot water. Toggle it back off to resume normal
+# solar/tank control on the next cron tick.
+try:
+    holiday = holiday_mode()
+except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+    logging.warning('startWP: could not read holiday flag, skipping run (relay unchanged): %s', e)
+    sys.exit(0)
+
+if holiday:
+    tank = fetchTemp()
+    relay = 'off'
+    msg = 'HOLIDAY mode - pump forced off (Ferien override active)'
+    try:
+        requests.request("POST", "http://192.168.137.68/relay/0?turn=off", timeout=10)
+    except requests.RequestException as e:
+        relay = None
+        msg = f'HOLIDAY mode - .68 off FAILED, may still be ON ({e}); retry next run'
+    logging.info(msg)
+    print(msg)
+    log_decision('start', 'holiday', relay, tank, None, None, None,
+                 solar_prod_level, None, None, msg)
+    sys.exit(0)
+
 actual_temp = fetchTemp()
 
 # The Shelly meters live on the LAN and can blip. If we cannot read them, skip

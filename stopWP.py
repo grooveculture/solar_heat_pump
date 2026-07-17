@@ -164,6 +164,49 @@ def turnOff():
     return requests.request("POST", url, headers=headers, data=payload, files=files, timeout=10)
 
 
+HOLIDAY_FLAG_URL = "http://192.168.137.227/rpc/Switch.GetStatus?id=0"
+HOLIDAY_FILE = "/tmp/wp_holiday"
+
+def holiday_mode():
+    """Vacation override: 'do not heat at all'. Either manual switch enables it:
+      - the .227 relay (wired to NOTHING - only hosts the tank temp addon),
+        toggled with one tap in the Shelly app  -> output ON = holiday.
+      - a local flag file `touch /tmp/wp_holiday`, an SSH/cron backup switch.
+    Raises on a network error so the caller can skip the run (leave .68 as-is)
+    rather than guess the flag state."""
+    if os.path.exists(HOLIDAY_FILE):
+        return True
+    r = requests.get(HOLIDAY_FLAG_URL, timeout=10)
+    return bool(r.json().get('output'))
+
+
+# --- Holiday override --------------------------------------------------------
+# One tap on the .227 relay in the Shelly app (or `touch /tmp/wp_holiday`) forces
+# the pump fully OFF and skips ALL normal logic - even the comfort floor - for
+# vacations when nobody needs hot water. Toggle it back off to resume normal
+# control on the next cron tick.
+try:
+    holiday = holiday_mode()
+except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+    logging.warning('stopWP: could not read holiday flag, skipping run (relay unchanged): %s', e)
+    sys.exit(0)
+
+if holiday:
+    tank = fetchTemp()
+    relay = 'off'
+    msg = 'HOLIDAY mode - pump forced off (Ferien override active)'
+    try:
+        turnOff()
+    except requests.RequestException as e:
+        relay = None
+        msg = f'HOLIDAY mode - .68 off FAILED, may still be ON ({e}); retry next run'
+    logging.info(msg)
+    print(msg)
+    log_decision('stop', 'holiday', relay, tank, None, None, None,
+                 solar_prod_level, None, None, msg)
+    connection.close()
+    sys.exit(0)
+
 # --- gather the current state ------------------------------------------------
 # The Shelly meters are on the LAN and can blip. If we cannot read them we CANNOT
 # make a safe stop decision, so we skip this run and leave the relay untouched
