@@ -28,9 +28,15 @@ Two cron scripts share thresholds so they never fight. Both run **24/7**
     *peak power* stays high through late summer (it's daily *energy*/day-length that
     shrinks), so the threshold holds ~4800 into Sept and only drops steeply Oct–Dec.
     SAFETY: this only gates the *solar* start — the 50 °C hot-water floor is separate
-    and always fires, so the pump can never be locked out. `stopWP.py`'s "sun present"
-    threshold is deliberately left low (1300) so a run isn't cut off mid-heat.
+    and always fires, so the pump can never be locked out.
     The value is logged every run to `wp_decision.solar_prod_level` (Grafana panel 91).
+  - **`stopWP.py` uses the SAME adaptive bar (2026-08-04):** it too now calls
+    `compute_adaptive_prod_level()` for "sun present", so the enable is held ON only
+    while PV is near the recent daily peak (~4800 W) instead of all day above a fixed
+    1300 W. A running compressor is still protected by `isHeating()` (never abort
+    mid-cycle) and the comfort floor still guarantees hot water, so the higher bar
+    can't short-cycle or leave the tank cold. Net effect: the pump is enabled roughly
+    only in the strong-sun window around midday (+ the two exceptions).
 - **`stopWP.py`** — drops `.68` only when idle + no sun + tank warm. SAFETY: never
   aborts a running compressor. "Running" = tank `temp_speicher` rising ≥ 0.3 °C over
   ~6 min **OR** total house draw ≥ `pump_power_level` (3000 W). The pump pulls

@@ -14,6 +14,10 @@ from datetime import datetime, timedelta
 # Decision thresholds (kept in sync with startWP.py so the two never fight).
 # ---------------------------------------------------------------------------
 comfort_floor = 50        # degC: at/above this the tank counts as "warm enough" to allow switching off
+# FALLBACK ONLY. The live "sun present" bar is computed at runtime by
+# compute_adaptive_prod_level() (~0.78 x recent daily peak), IDENTICAL to
+# startWP.py so the two never fight. This 1300 is used only if the PV query
+# returns no data. Tune PEAK_FACTOR / PEAK_WINDOW_DAYS below, not here.
 solar_prod_level = 1300   # W of PV production that counts as real sun (summer)
 red_for_bad_weather = 1000
 rise_threshold = 0.3      # degC rise over ~6 min => a compressor is actively heating
@@ -28,8 +32,20 @@ def is_winter():
 
 # Winter parameters (mirror startWP.py)
 if is_winter():
-    solar_prod_level = 1000
+    solar_prod_level = 1000  # winter fallback only (runtime value is adaptive, see below)
     red_for_bad_weather = 750
+
+# --- Adaptive solar threshold (mirrors startWP.py) --------------------------
+# Keep the enable ON only while PV is near its recent DAILY PEAK - the same bar
+# startWP uses to turn it ON - so once the pump is idle and the sun drops below
+# ~0.78 x the recent peak, stopWP drops the .68 enable instead of holding it on
+# all day at a low fixed bar. A running compressor is still protected by
+# isHeating(), and the comfort floor still keeps hot water, so a too-high bar
+# can never abort a cycle or leave the tank cold.
+PEAK_FACTOR = 0.78          # fraction of the recent daily peak to require
+PEAK_WINDOW_DAYS = 10       # trailing window the daily peak is averaged over
+PROD_LEVEL_FLOOR = 800      # never require less (winter hot-water sanity)
+PROD_LEVEL_CAP = 5000       # never require more than the pump can use (~4.8 kW)
 
 
 def instance_already_running():
@@ -142,6 +158,36 @@ def fetchWeather():
     return avg_clouds, cur_clouds
 
 
+def get_avg_daily_peak(days=10):
+    """Average of the PER-DAY maximum sol_w over the last `days` full days - the
+    seasonal-production signal the adaptive threshold rides on. Identical to
+    startWP.get_avg_daily_peak(). Returns None if there is no data."""
+    cursor = connection.cursor(prepared=True)
+    query = ("SELECT AVG(daily_peak) FROM ("
+             "SELECT MAX(sol_w) AS daily_peak FROM shelly_solar "
+             "WHERE stamp >= CURDATE() - INTERVAL %s DAY AND stamp < CURDATE() "
+             "GROUP BY DATE(stamp)) AS s")
+    cursor.execute(query, (days,))
+    row = cursor.fetchone()
+    cursor.close()
+    return float(row[0]) if row and row[0] is not None else None
+
+
+def compute_adaptive_prod_level(static_default):
+    """Adaptive solar_prod_level = PEAK_FACTOR * recent daily peak, clamped.
+    Falls back to the static default if there is no recent PV data. Identical to
+    startWP.compute_adaptive_prod_level() so start/stop share one bar."""
+    peak = get_avg_daily_peak(PEAK_WINDOW_DAYS)
+    if peak is None:
+        logging.warning('stopWP: no recent PV data, using static solar_prod_level %s', static_default)
+        return static_default
+    level = int(round(PEAK_FACTOR * peak))
+    level = max(PROD_LEVEL_FLOOR, min(PROD_LEVEL_CAP, level))
+    logging.info('stopWP: adaptive solar_prod_level %sW (%.0f%% of %.0fW avg daily peak, last %sd)',
+                 level, PEAK_FACTOR * 100, peak, PEAK_WINDOW_DAYS)
+    return level
+
+
 def log_decision(script, action, relay, tank, solar_total, netz_total, actual_usage, solar_prod_level, sun_present, heating, reason):
     """Persist one decision row so Grafana can show WHY the pump switched."""
     try:
@@ -230,6 +276,10 @@ print('actual usage: ', actual_usage)
 tank = fetchTemp()
 heating = isHeating(actual_usage)
 print('tank: ', tank, ' heating: ', heating)
+
+# Learn the sun bar from recent production (same as startWP) instead of a fixed
+# 1300 W, so the enable is held ON only while PV is near its recent daily peak.
+solar_prod_level = compute_adaptive_prod_level(solar_prod_level)
 
 # Lower the sun bar when it is clear now but the forecast turns bad later -
 # same "grab it while we can" adjustment startWP uses, so both agree on "sun".
