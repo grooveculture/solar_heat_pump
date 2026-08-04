@@ -51,10 +51,10 @@ PROD_LEVEL_CAP = 5000       # never require more than the pump can use (~4.8 kW)
 # the peak underdelivered and the tank still wants solar, so start/stop agree on
 # the lowered bar (otherwise they'd ping-pong: startWP re-enables at the relaxed
 # bar while stopWP disables at the full one).
-PEAK_HOUR = 13
-FALLBACK_END_HOUR = 17
 FALLBACK_MIN_LEVEL = 1500
 SOLAR_TARGET_TEMP = 58
+DEFAULT_PEAK_HOUR = 13      # fallback if there's no recent data to learn the curve from
+DEFAULT_END_HOUR = 18
 
 
 def instance_already_running():
@@ -197,19 +197,40 @@ def compute_adaptive_prod_level(static_default):
     return level
 
 
+def get_solar_day_window(days=PEAK_WINDOW_DAYS):
+    """Learn peak_hour / end_hour of the solar day from recent production so the
+    fallback tracks the season. Identical to startWP.get_solar_day_window()."""
+    cursor = connection.cursor(prepared=True)
+    cursor.execute("SELECT HOUR(stamp) h, AVG(GREATEST(sol_w,0)) a FROM shelly_solar "
+                   "WHERE stamp >= CURDATE() - INTERVAL %s DAY AND stamp < CURDATE() "
+                   "GROUP BY HOUR(stamp)", (days,))
+    prof = {int(h): float(a) for h, a in cursor.fetchall() if a is not None}
+    cursor.close()
+    if not prof:
+        return DEFAULT_PEAK_HOUR, DEFAULT_END_HOUR
+    peak_hour = max(prof, key=prof.get)
+    sun_hours = [h for h, a in prof.items() if a >= FALLBACK_MIN_LEVEL and h > peak_hour]
+    end_hour = max(sun_hours) if sun_hours else peak_hour + 1
+    return peak_hour, end_hour
+
+
 def afternoon_fallback_level(full_level, tank_temp):
-    """Relax the sun bar in the afternoon if the tank still wants solar heat, so
-    stopWP holds the enable on for the same weak declining sun startWP will start
-    on. Identical to startWP.afternoon_fallback_level(). Never raises the bar."""
-    hour = datetime.now().hour
-    if hour < PEAK_HOUR or tank_temp >= SOLAR_TARGET_TEMP:
+    """Relax the sun bar after the (learned) daily peak if the tank still wants
+    solar heat, so stopWP holds the enable on for the same weak declining sun
+    startWP will start on. Identical to startWP.afternoon_fallback_level()."""
+    if tank_temp >= SOLAR_TARGET_TEMP:
         return full_level
-    frac = min(1.0, (hour - PEAK_HOUR) / float(FALLBACK_END_HOUR - PEAK_HOUR))
+    hour = datetime.now().hour
+    peak_hour, end_hour = get_solar_day_window()
+    if hour < peak_hour:
+        return full_level
+    span = max(1, end_hour - peak_hour)
+    frac = min(1.0, (hour - peak_hour) / float(span))
     relaxed = full_level - frac * (full_level - FALLBACK_MIN_LEVEL)
     level = int(round(max(FALLBACK_MIN_LEVEL, min(full_level, relaxed))))
     if level < full_level:
-        logging.info('stopWP: afternoon fallback %02d:00 tank %.0fC<%dC -> bar %sW (was %sW)',
-                     hour, tank_temp, SOLAR_TARGET_TEMP, level, full_level)
+        logging.info('stopWP: afternoon fallback %02d:00 (peak %02d, end %02d) tank %.0fC<%dC -> bar %sW (was %sW)',
+                     hour, peak_hour, end_hour, tank_temp, SOLAR_TARGET_TEMP, level, full_level)
     return level
 
 

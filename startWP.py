@@ -195,24 +195,49 @@ PROD_LEVEL_CAP = 5000       # never require more than the pump can use (~4.8 kW)
 # FALLBACK_MIN_LEVEL, grabbing the best remaining sun before the day closes.
 # Stateless: the tank temp IS the "did we capture sun today" signal. The 50 C
 # comfort floor still handles a genuinely dark day at night.
-PEAK_HOUR = 13              # don't relax before this - wait for the real midday peak
-FALLBACK_END_HOUR = 17      # by this hour the bar has fully relaxed
 FALLBACK_MIN_LEVEL = 1500   # lowest the fallback drops to (below this it's not worth a 3 kW pump)
 SOLAR_TARGET_TEMP = 58      # degC: below this in the afternoon we still want to top up on solar
+DEFAULT_PEAK_HOUR = 13      # fallback if there's no recent data to learn the curve from
+DEFAULT_END_HOUR = 18
+
+def get_solar_day_window(days=PEAK_WINDOW_DAYS):
+    """Learn the shape of the solar day from recent production so the fallback
+    tracks the season instead of using fixed clock hours:
+      peak_hour = hour of the average daily maximum production (relax only after it)
+      end_hour  = latest hour production is still worth catching (avg >= FALLBACK_MIN_LEVEL)
+    Both shift earlier as autumn shortens the day. Falls back to the DEFAULT_*
+    hours if there's no recent data."""
+    cursor = connection.cursor(prepared=True)
+    cursor.execute("SELECT HOUR(stamp) h, AVG(GREATEST(sol_w,0)) a FROM shelly_solar "
+                   "WHERE stamp >= CURDATE() - INTERVAL %s DAY AND stamp < CURDATE() "
+                   "GROUP BY HOUR(stamp)", (days,))
+    prof = {int(h): float(a) for h, a in cursor.fetchall() if a is not None}
+    cursor.close()
+    if not prof:
+        return DEFAULT_PEAK_HOUR, DEFAULT_END_HOUR
+    peak_hour = max(prof, key=prof.get)
+    sun_hours = [h for h, a in prof.items() if a >= FALLBACK_MIN_LEVEL and h > peak_hour]
+    end_hour = max(sun_hours) if sun_hours else peak_hour + 1
+    return peak_hour, end_hour
 
 def afternoon_fallback_level(full_level, tank_temp):
-    """Relax the solar bar in the afternoon if the tank still wants solar heat,
-    so we catch weak declining sun instead of grid-heating at night. Returns the
-    (possibly lowered) bar; never raises it above full_level."""
+    """Relax the solar bar after the (learned) daily peak if the tank still wants
+    solar heat, so we catch weak declining sun instead of grid-heating at night.
+    The relax window is learned from recent data so it moves with the season.
+    Returns the (possibly lowered) bar; never raises it above full_level."""
+    if tank_temp >= SOLAR_TARGET_TEMP:
+        return full_level                       # tank already fine - no need to grab sun
     hour = datetime.now().hour
-    if hour < PEAK_HOUR or tank_temp >= SOLAR_TARGET_TEMP:
-        return full_level                       # wait for the peak, or tank already fine
-    frac = min(1.0, (hour - PEAK_HOUR) / float(FALLBACK_END_HOUR - PEAK_HOUR))
+    peak_hour, end_hour = get_solar_day_window()
+    if hour < peak_hour:
+        return full_level                       # before the peak - wait for it
+    span = max(1, end_hour - peak_hour)
+    frac = min(1.0, (hour - peak_hour) / float(span))
     relaxed = full_level - frac * (full_level - FALLBACK_MIN_LEVEL)
     level = int(round(max(FALLBACK_MIN_LEVEL, min(full_level, relaxed))))
     if level < full_level:
-        logging.info('startWP: afternoon fallback %02d:00 tank %.0fC<%dC -> bar %sW (was %sW)',
-                     hour, tank_temp, SOLAR_TARGET_TEMP, level, full_level)
+        logging.info('startWP: afternoon fallback %02d:00 (peak %02d, end %02d) tank %.0fC<%dC -> bar %sW (was %sW)',
+                     hour, peak_hour, end_hour, tank_temp, SOLAR_TARGET_TEMP, level, full_level)
     return level
 
 def compute_adaptive_prod_level(static_default):

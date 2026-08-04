@@ -50,6 +50,10 @@ Two cron scripts share thresholds so they never fight. Both run **24/7**
     forecast-driven power cut is a blunt tool; the tank-temp fallback targets the real
     loss (a single below-average day amid good ones). The older "clear now, cloudy
     later → −`red_for_bad_weather`" reduction is kept (fires in the morning, complementary).
+    The relax window is DYNAMIC (`get_solar_day_window()`): peak_hour = hour of the avg
+    daily max production, end_hour = latest hour avg production ≥ `FALLBACK_MIN_LEVEL`
+    (learned from the last 10 days, so both shift earlier toward autumn). Now 13→19;
+    `DEFAULT_PEAK_HOUR`/`DEFAULT_END_HOUR` are the no-data fallback.
 - **`stopWP.py`** — drops `.68` only when idle + no sun + tank warm. SAFETY: never
   aborts a running compressor. "Running" = tank `temp_speicher` rising ≥ 0.3 °C over
   ~6 min **OR** total house draw ≥ `pump_power_level` (3000 W). The pump pulls
@@ -120,6 +124,14 @@ Panels added/changed 2026-07-04 (all use the swap-safe `sol_w` methodology, see 
 | 83 | dito als **%**-Anteil (jeder Balken = 100 %) |
 | 84 | Hausverbrauch/**Tag** gestapelt (letzte 30 Tage) |
 | 91 | **WP – Solar-Start-Schwelle (adaptiv, W)** — time series of `wp_decision.solar_prod_level` (2026-08-04) |
+
+**TZ GOTCHA (fixed 2026-08-04):** `wp_decision.ts` and `shelly_solar.stamp` are naive LOCAL
+(CEST) datetimes, but Grafana's MySQL datasource reads a raw datetime column as UTC — so a
+panel selecting `ts AS "time"` plots the newest rows +2 h in the future (off the right edge).
+ALWAYS wrap the time column: `UNIX_TIMESTAMP(ts) AS "time"` (as panels 11/60/61 already do
+with `unix_timestamp(stamp/createdAt)`). Bit panel 91 then panel 66 (the latter was hiding
+the recent `disabled` states). Full audit 2026-08-04: only 66 & 91 were affected; all other
+time-series use `unix_timestamp`, and the bar/stat panels use category axes or `stamp LIKE`.
 | Autarkie today/yesterday/(Monat) (38/39/69) | old EA panels: **corrected to `sol_w`** + **renamed "Autarkie"** (user later pruned the 2025/30d/¼y/½y/year-back variants) |
 
 ### Eigenanteil vs. Autarkie (two distinct KPIs — do not conflate)
