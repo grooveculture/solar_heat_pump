@@ -18,6 +18,19 @@ Two cron scripts share thresholds so they never fight. Both run **24/7**
   (`solar_total >= solar_prod_level` AND `usage < actual_use_limit`) OR tank
   `< min_temp` (50 °C hot-water floor). Running 24/7 is safe: the solar branch
   can't fire at night (the 3EM reads ~−5 W), so overnight it only enforces the floor.
+  - **Adaptive `solar_prod_level` (2026-08-04):** no longer a fixed 1300 W. Now
+    `compute_adaptive_prod_level()` = `PEAK_FACTOR(0.78) × avg of the last 10 daily
+    peaks` (`get_avg_daily_peak`, `GREATEST(sol_w,0)` grouped by day), clamped to
+    `PROD_LEVEL_FLOOR..CAP` = **800–5000 W**. So the pump only starts near the recent
+    daily peak (≈4800 W now → PV nearly covers the ~3.3–4.8 kW compressor) instead of
+    dribbling in at 1300 W in the early morning. It self-lowers as autumn peaks fall.
+    Falls back to the static default if PV data is missing. NOTE: in CH the daily
+    *peak power* stays high through late summer (it's daily *energy*/day-length that
+    shrinks), so the threshold holds ~4800 into Sept and only drops steeply Oct–Dec.
+    SAFETY: this only gates the *solar* start — the 50 °C hot-water floor is separate
+    and always fires, so the pump can never be locked out. `stopWP.py`'s "sun present"
+    threshold is deliberately left low (1300) so a run isn't cut off mid-heat.
+    The value is logged every run to `wp_decision.solar_prod_level` (Grafana panel 91).
 - **`stopWP.py`** — drops `.68` only when idle + no sun + tank warm. SAFETY: never
   aborts a running compressor. "Running" = tank `temp_speicher` rising ≥ 0.3 °C over
   ~6 min **OR** total house draw ≥ `pump_power_level` (3000 W). The pump pulls
@@ -87,6 +100,7 @@ Panels added/changed 2026-07-04 (all use the swap-safe `sol_w` methodology, see 
 | 82 | Hausverbrauch/Monat gestapelt: Eigen(Solar) vs Elektra, kWh (ab 2025) |
 | 83 | dito als **%**-Anteil (jeder Balken = 100 %) |
 | 84 | Hausverbrauch/**Tag** gestapelt (letzte 30 Tage) |
+| 91 | **WP – Solar-Start-Schwelle (adaptiv, W)** — time series of `wp_decision.solar_prod_level` (2026-08-04) |
 | Autarkie today/yesterday/(Monat) (38/39/69) | old EA panels: **corrected to `sol_w`** + **renamed "Autarkie"** (user later pruned the 2025/30d/¼y/½y/year-back variants) |
 
 ### Eigenanteil vs. Autarkie (two distinct KPIs — do not conflate)

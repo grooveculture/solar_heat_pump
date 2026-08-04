@@ -10,6 +10,10 @@ import config
 from datetime import datetime, timedelta
 
 min_temp = 50
+# FALLBACK ONLY. The live threshold is computed at runtime by
+# compute_adaptive_prod_level() (see below, ~0.78 x recent daily peak). This 1300
+# is used only if the PV query returns no data. Do not "fix" it here - tune
+# PEAK_FACTOR / PEAK_WINDOW_DAYS instead.
 solar_prod_level = 1300
 actual_use_limit = 850
 red_for_bad_weather = 1000
@@ -21,7 +25,7 @@ def is_winter():
 # Check if it's winter and adjust parameters
 if is_winter():
     min_temp = 50  # Set minimum temperature for winter
-    solar_prod_level = 1000  # Set solar production level for winter
+    solar_prod_level = 1000  # winter fallback only (see note above; runtime value is adaptive)
     red_for_bad_weather = 750  # Set reduction for bad weather in winter
 
 def instance_already_running():
@@ -147,28 +151,53 @@ def get_avg_max_sol_w_last_two_years():
 
     return avg_max_sol_w_last_two_years
 
-def get_avg_max_sol_w_last_20_days():
+def get_avg_daily_peak(days=10):
     """
-    Get the average of the maximum sol_w of the last 10 days.
+    Average of the PER-DAY maximum sol_w over the last `days` full days.
+
+    This is the seasonal-production signal the adaptive threshold rides on: it
+    tracks how strong the daily PV peak has been recently, so it falls on its own
+    as we head into autumn/winter. (The old version had no GROUP BY, so it
+    returned the single highest sample in the window instead of the mean of the
+    daily peaks - useless as a baseline.)
 
     Returns:
-        float: The average of the maximum sol_w of the last 10 days.
+        float | None: mean daily-peak sol_w in W, or None if there is no data.
     """
     cursor = connection.cursor(prepared=True)
-
-    # Calculate the start and end dates of the timerange for the last 20 days
-    start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d %H:%M:%S')
-    end_date = (datetime.now()).strftime('%Y-%m-%d %H:%M:%S')
-
-    # Get the maximum sol_w of the last 20 days
-    query = f"SELECT AVG(max_sol_w) AS avg_max_sol_w FROM (SELECT MAX(sol_w) AS max_sol_w FROM shelly_solar WHERE stamp BETWEEN '{start_date}' AND '{end_date}') AS subquery"
-    cursor.execute(query)
-    results = cursor.fetchall()
-    avg_max_sol_w_last_20_days = results[0][0]
-
+    # CURDATE() excludes today (partial day); use the last `days` COMPLETE days.
+    query = ("SELECT AVG(daily_peak) FROM ("
+             "SELECT MAX(sol_w) AS daily_peak FROM shelly_solar "
+             "WHERE stamp >= CURDATE() - INTERVAL %s DAY AND stamp < CURDATE() "
+             "GROUP BY DATE(stamp)) AS s")
+    cursor.execute(query, (days,))
+    row = cursor.fetchone()
     cursor.close()
+    return float(row[0]) if row and row[0] is not None else None
 
-    return avg_max_sol_w_last_20_days
+
+# --- Adaptive solar-start threshold -----------------------------------------
+# Start the pump only when PV is near its recent DAILY PEAK, so production can
+# (almost) cover the compressor's ~3.3-4.8 kW draw instead of dribbling in at a
+# fixed 1300 W in the early morning. The level is a fraction of the recent daily
+# peak, so it self-lowers as the season fades - no manual retuning.
+PEAK_FACTOR = 0.78          # fraction of the recent daily peak to require
+PEAK_WINDOW_DAYS = 10       # trailing window the daily peak is averaged over
+PROD_LEVEL_FLOOR = 800      # never require less (winter hot-water sanity)
+PROD_LEVEL_CAP = 5000       # never require more than the pump can use (~4.8 kW)
+
+def compute_adaptive_prod_level(static_default):
+    """Adaptive solar_prod_level = PEAK_FACTOR * recent daily peak, clamped.
+    Falls back to the static default if there is no recent PV data."""
+    peak = get_avg_daily_peak(PEAK_WINDOW_DAYS)
+    if peak is None:
+        logging.warning('startWP: no recent PV data, using static solar_prod_level %s', static_default)
+        return static_default
+    level = int(round(PEAK_FACTOR * peak))
+    level = max(PROD_LEVEL_FLOOR, min(PROD_LEVEL_CAP, level))
+    logging.info('startWP: adaptive solar_prod_level %sW (%.0f%% of %.0fW avg daily peak, last %sd)',
+                 level, PEAK_FACTOR * 100, peak, PEAK_WINDOW_DAYS)
+    return level
 
 def log_decision(script, action, relay, tank, solar_total, netz_total, actual_usage, solar_prod_level, sun_present, heating, reason):
     """Persist one decision row so Grafana can show WHY the pump switched."""
@@ -275,9 +304,8 @@ actual_usage = solar_total + netz_total
 print('actual usage: ', actual_usage)
 
 
-test_solar_prod_level = get_avg_max_sol_w_last_two_years()
-
-test_solar_prod_level_last_10_days = get_avg_max_sol_w_last_20_days()
+# Learn the start threshold from recent production instead of the fixed 1300 W.
+solar_prod_level = compute_adaptive_prod_level(solar_prod_level)
 
 avg_clouds_forecast, avg_clouds_current_forecast = fetchWeather()
 if  avg_clouds_forecast > 70 and avg_clouds_current_forecast < 70:
