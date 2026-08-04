@@ -47,6 +47,15 @@ PEAK_WINDOW_DAYS = 10       # trailing window the daily peak is averaged over
 PROD_LEVEL_FLOOR = 800      # never require less (winter hot-water sanity)
 PROD_LEVEL_CAP = 5000       # never require more than the pump can use (~4.8 kW)
 
+# Afternoon fallback (mirrors startWP.py) - relax the sun bar late in the day if
+# the peak underdelivered and the tank still wants solar, so start/stop agree on
+# the lowered bar (otherwise they'd ping-pong: startWP re-enables at the relaxed
+# bar while stopWP disables at the full one).
+PEAK_HOUR = 13
+FALLBACK_END_HOUR = 17
+FALLBACK_MIN_LEVEL = 1500
+SOLAR_TARGET_TEMP = 58
+
 
 def instance_already_running():
     lock_file_pointer = os.open("/tmp/stopWP.lock", os.O_WRONLY | os.O_CREAT)
@@ -188,6 +197,22 @@ def compute_adaptive_prod_level(static_default):
     return level
 
 
+def afternoon_fallback_level(full_level, tank_temp):
+    """Relax the sun bar in the afternoon if the tank still wants solar heat, so
+    stopWP holds the enable on for the same weak declining sun startWP will start
+    on. Identical to startWP.afternoon_fallback_level(). Never raises the bar."""
+    hour = datetime.now().hour
+    if hour < PEAK_HOUR or tank_temp >= SOLAR_TARGET_TEMP:
+        return full_level
+    frac = min(1.0, (hour - PEAK_HOUR) / float(FALLBACK_END_HOUR - PEAK_HOUR))
+    relaxed = full_level - frac * (full_level - FALLBACK_MIN_LEVEL)
+    level = int(round(max(FALLBACK_MIN_LEVEL, min(full_level, relaxed))))
+    if level < full_level:
+        logging.info('stopWP: afternoon fallback %02d:00 tank %.0fC<%dC -> bar %sW (was %sW)',
+                     hour, tank_temp, SOLAR_TARGET_TEMP, level, full_level)
+    return level
+
+
 def log_decision(script, action, relay, tank, solar_total, netz_total, actual_usage, solar_prod_level, sun_present, heating, reason):
     """Persist one decision row so Grafana can show WHY the pump switched."""
     try:
@@ -287,6 +312,10 @@ avg_clouds, cur_clouds = fetchWeather()
 if avg_clouds > 70 and cur_clouds < 70:
     solar_prod_level = solar_prod_level - red_for_bad_weather
     print('solar_prod_level after reduction: ', solar_prod_level)
+
+# Afternoon fallback: hold the enable on for the same relaxed bar startWP starts
+# on, so the two never ping-pong when the peak underdelivered.
+solar_prod_level = afternoon_fallback_level(solar_prod_level, tank)
 
 sun_present = solar_total >= solar_prod_level
 

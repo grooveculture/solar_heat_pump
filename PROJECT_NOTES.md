@@ -37,6 +37,19 @@ Two cron scripts share thresholds so they never fight. Both run **24/7**
     mid-cycle) and the comfort floor still guarantees hot water, so the higher bar
     can't short-cycle or leave the tank cold. Net effect: the pump is enabled roughly
     only in the strong-sun window around midday (+ the two exceptions).
+  - **Afternoon fallback (2026-08-04):** `afternoon_fallback_level()` in BOTH scripts.
+    On a day whose peak underdelivers (worse than the 10-day avg the bar rides on) PV
+    never reaches ~4800 W, so the pump would skip solar and grid-heat at night. Fix:
+    wait for the peak until `PEAK_HOUR` (13:00), then - only if the tank still wants
+    solar heat (`< SOLAR_TARGET_TEMP` 58 °C, which a normal sunny day already passed) -
+    step the bar linearly down to `FALLBACK_MIN_LEVEL` (1500 W) by `FALLBACK_END_HOUR`
+    (17:00), grabbing the best remaining sun. STATELESS: the tank temp is the "did we
+    capture sun today" signal - no history query. Applied in start AND stop (same curve)
+    or they'd ping-pong. Data behind it: clouds_all correlates only +0.49 with daily
+    PEAK power (bursty cloudy days still peak >5 kW) but −0.55 with daily kWh, so a
+    forecast-driven power cut is a blunt tool; the tank-temp fallback targets the real
+    loss (a single below-average day amid good ones). The older "clear now, cloudy
+    later → −`red_for_bad_weather`" reduction is kept (fires in the morning, complementary).
 - **`stopWP.py`** — drops `.68` only when idle + no sun + tank warm. SAFETY: never
   aborts a running compressor. "Running" = tank `temp_speicher` rising ≥ 0.3 °C over
   ~6 min **OR** total house draw ≥ `pump_power_level` (3000 W). The pump pulls

@@ -186,6 +186,35 @@ PEAK_WINDOW_DAYS = 10       # trailing window the daily peak is averaged over
 PROD_LEVEL_FLOOR = 800      # never require less (winter hot-water sanity)
 PROD_LEVEL_CAP = 5000       # never require more than the pump can use (~4.8 kW)
 
+# --- Afternoon fallback ------------------------------------------------------
+# On a day whose peak underdelivers (thin overcast, worse than the 10-day avg the
+# bar rides on), PV never reaches the full bar, so the pump would skip solar and
+# grid-heat tonight. Instead: wait for the peak until PEAK_HOUR, then - only if
+# the tank still WANTS solar heat (below SOLAR_TARGET_TEMP, which a normal sunny
+# day has already blown past) - step the bar down hour by hour toward
+# FALLBACK_MIN_LEVEL, grabbing the best remaining sun before the day closes.
+# Stateless: the tank temp IS the "did we capture sun today" signal. The 50 C
+# comfort floor still handles a genuinely dark day at night.
+PEAK_HOUR = 13              # don't relax before this - wait for the real midday peak
+FALLBACK_END_HOUR = 17      # by this hour the bar has fully relaxed
+FALLBACK_MIN_LEVEL = 1500   # lowest the fallback drops to (below this it's not worth a 3 kW pump)
+SOLAR_TARGET_TEMP = 58      # degC: below this in the afternoon we still want to top up on solar
+
+def afternoon_fallback_level(full_level, tank_temp):
+    """Relax the solar bar in the afternoon if the tank still wants solar heat,
+    so we catch weak declining sun instead of grid-heating at night. Returns the
+    (possibly lowered) bar; never raises it above full_level."""
+    hour = datetime.now().hour
+    if hour < PEAK_HOUR or tank_temp >= SOLAR_TARGET_TEMP:
+        return full_level                       # wait for the peak, or tank already fine
+    frac = min(1.0, (hour - PEAK_HOUR) / float(FALLBACK_END_HOUR - PEAK_HOUR))
+    relaxed = full_level - frac * (full_level - FALLBACK_MIN_LEVEL)
+    level = int(round(max(FALLBACK_MIN_LEVEL, min(full_level, relaxed))))
+    if level < full_level:
+        logging.info('startWP: afternoon fallback %02d:00 tank %.0fC<%dC -> bar %sW (was %sW)',
+                     hour, tank_temp, SOLAR_TARGET_TEMP, level, full_level)
+    return level
+
 def compute_adaptive_prod_level(static_default):
     """Adaptive solar_prod_level = PEAK_FACTOR * recent daily peak, clamped.
     Falls back to the static default if there is no recent PV data."""
@@ -312,5 +341,9 @@ if  avg_clouds_forecast > 70 and avg_clouds_current_forecast < 70:
     solar_prod_level = solar_prod_level - red_for_bad_weather
     print('solar_prod_level after reducation')
     print(solar_prod_level)
-   
+
+# Afternoon fallback: if the peak underdelivered and the tank still wants solar,
+# relax the bar to grab the best remaining sun before grid-heating tonight.
+solar_prod_level = afternoon_fallback_level(solar_prod_level, actual_temp)
+
 startWP(actual_temp, solar_total)
