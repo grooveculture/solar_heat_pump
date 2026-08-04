@@ -101,7 +101,7 @@ Backfilled from `controlWP.log` (only post-rewrite lines from 2026-07-02 match).
 Panels added this session (66–76, all at the bottom, existing panels untouched):
 | id | panel |
 |----|-------|
-| 66 | WP – Entscheidung (warum an/aus) — state-timeline of `wp_decision.action` |
+| 66 | WP – Schalter (An/Aus) — state-timeline of the actual .68 switch from `wp_decision.relay` (non-NULL rows only; was `action`-decision, changed 2026-08-04) |
 | 67 | Solar produziert (Monat) |
 | 68 | Elektra bezogen (Monat) |
 | 69 | Eigenanteil (Monat) |
